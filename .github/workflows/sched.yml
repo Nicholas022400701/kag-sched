@@ -1,0 +1,86 @@
+name: sched
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    inputs:
+      dryRun:
+        description: 'Dry run: query and decide, push nothing, write nothing back'
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: sched
+  cancel-in-progress: false
+env:
+  SRC_REPO: Nicholas022400701/nndl-samam
+  SRC_BRANCH: main
+jobs:
+  round:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Require and mask secrets
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          KAGGLE_USER: ${{ secrets.KAGGLE_USER }}
+          SRC_REPO_PAT: ${{ secrets.SRC_REPO_PAT }}
+        run: |
+          for v in KAGGLE_API_TOKEN KAGGLE_USER SRC_REPO_PAT; do
+            if [ -z "${!v}" ]; then echo "missing secret: $v"; exit 1; fi
+            echo "::add-mask::${!v}"
+          done
+          echo "::add-mask::$(printf '%s' "$KAGGLE_USER" | tr '[:lower:]' '[:upper:]')"
+          echo "::add-mask::$(printf 'x-access-token:%s' "$SRC_REPO_PAT" | base64 -w0)"
+      - name: Checkout scheduler
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Checkout source repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ env.SRC_REPO }}
+          ref: ${{ env.SRC_BRANCH }}
+          token: ${{ secrets.SRC_REPO_PAT }}
+          path: src
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Install client
+        run: python3 -m pip install -q --disable-pip-version-check kaggle==2.2.4 requests
+      - name: Self scan of the public tree
+        env:
+          KAGGLE_USER: ${{ secrets.KAGGLE_USER }}
+        run: python3 scan.py --paths sched.py scan.py README.md SECURITY.md .github
+      - name: Run one scheduling round
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          KAGGLE_USER: ${{ secrets.KAGGLE_USER }}
+          SRC_DIR: ${{ github.workspace }}/src
+          DRY_RUN: ${{ inputs.dryRun }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then python3 sched.py --dry-run; else python3 sched.py; fi
+      - name: Scan and write back to the source repository
+        if: ${{ inputs.dryRun != true }}
+        env:
+          KAGGLE_USER: ${{ secrets.KAGGLE_USER }}
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          SRC_REPO_PAT: ${{ secrets.SRC_REPO_PAT }}
+          SRC_DIR: ${{ github.workspace }}/src
+        run: |
+          cd "$SRC_DIR"
+          git add -A .
+          if git diff --cached --quiet; then echo "nothing to write back"; exit 0; fi
+          python3 "$GITHUB_WORKSPACE/scan.py" --staged
+          git -c user.name=sched-bot -c user.email=sched-bot@users.noreply.github.com commit -q -m "sched: round $(date -u +%Y-%m-%dT%H:%MZ)"
+          auth=$(printf 'x-access-token:%s' "$SRC_REPO_PAT" | base64 -w0)
+          for i in 1 2 3; do
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" fetch -q origin "$SRC_BRANCH"
+            if ! git rebase -q "origin/$SRC_BRANCH"; then git rebase --abort; echo "rebase conflict"; exit 1; fi
+            if git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push -q origin "HEAD:$SRC_BRANCH"; then echo "written back"; exit 0; fi
+            sleep 10
+          done
+          echo "push failed after 3 attempts"; exit 1
+      - name: Remove source checkout
+        if: always()
+        run: rm -rf "$GITHUB_WORKSPACE/src"
