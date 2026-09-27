@@ -1,7 +1,8 @@
 name: sched
 on:
-  schedule:
-    - cron: '*/15 * * * *'
+  # cron is switched on once the three secrets exist; until then every scheduled run would fail at the first step and mail the owner
+  # schedule:
+  #   - cron: '*/15 * * * *'
   workflow_dispatch:
     inputs:
       dryRun:
@@ -47,7 +48,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
       - name: Install client
-        run: python3 -m pip install -q --disable-pip-version-check kaggle==2.2.4 requests
+        run: python3 -m pip install -q --user --disable-pip-version-check kaggle==2.2.4 requests
       - name: Self scan of the public tree
         env:
           KAGGLE_USER: ${{ secrets.KAGGLE_USER }}

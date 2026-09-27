@@ -1,7 +1,9 @@
 """Generic cron scheduler for Kaggle kernels. One polling round per run, then exit.
 Env: KAGGLE_API_TOKEN (used by the kaggle client), KAGGLE_USER (kernel owner), SRC_DIR (checkout that holds orch/plan.json).
 Reads  <SRC_DIR>/orch/plan.json (job list, owners, limits) and <SRC_DIR>/orch/state.json.
+Kernels outside the plan are remembered in state.seen so finished ones are not queried again.
 Writes <SRC_DIR>/orch/state.json, fetched outputs to <resultsDir>/raw/<slug>/, derived resume kernels to orch/kernels/.
+Kernels on the account that are not in the plan count as GPU sessions (the list endpoint does not report the accelerator).
 Log lines carry only kernel slugs, statuses, counts and hours. Everything printed passes a masker that hides the owner name and the token.
 Exit codes: 0 normal (API trouble is logged and treated as unknown), 2 missing configuration."""
 import argparse
@@ -79,8 +81,16 @@ def listMine(k, prefix):
         if '/' not in ref or not ref.split('/')[1].startswith(prefix):
             continue
         lr = getattr(kn, 'last_run_time', None)
-        out[ref.split('/')[1]] = {'lastRunTime': lr.replace(tzinfo=None).strftime(fmt) if lr else None, 'gpu': bool(getattr(kn, 'enable_gpu', False))}
+        out[ref.split('/')[1]] = {'lastRunTime': lr.replace(tzinfo=None).strftime(fmt) if lr else None}
     return out
+def gpuOf(src, slug, specs, jobs):
+    if slug in jobs and 'gpu' in jobs[slug]:
+        return bool(jobs[slug]['gpu'])
+    if slug in specs:
+        m = readJson(os.path.join(src, specs[slug].get('kernelDir', ''), 'kernel-metadata.json'))
+        if m is not None:
+            return bool(m.get('enable_gpu', False))
+    return True
 def specsOf(plan, jobs):
     out = {}
     for j in plan.get('jobs', []):
@@ -145,7 +155,7 @@ def logSeconds(p):
         return None
 def fetchOut(k, user, slug, dest, lim):
     from kagglesdk.kernels.types.kernels_api_service import ApiListKernelSessionOutputRequest
-    files, tok = [], None
+    files, tok, sessLog = [], None, ''
     while True:
         with k.build_kaggle_client() as kc:
             rq = ApiListKernelSessionOutputRequest()
@@ -155,10 +165,19 @@ def fetchOut(k, user, slug, dest, lim):
             rq.page_token = tok or ''
             rs = kc.kernels.kernels_api_client.list_kernel_session_output(rq)
         files += list(rs.files or [])
+        sessLog = sessLog or str(rs.log or '')
         tok = rs.next_page_token
         if not tok:
             break
     got, skip, total, maxSec = [], [], 0, None
+    if sessLog:
+        p = os.path.join(dest, '_session.log')
+        os.makedirs(dest, exist_ok=True)
+        with open(p, 'w') as f:
+            f.write(sessLog[:2 * 1048576])
+        maskFile(p, user)
+        maxSec = logSeconds(p)
+        total += os.path.getsize(p)
     for it in files:
         name = str(it.file_name or '')
         norm = os.path.normpath(name)
@@ -187,7 +206,7 @@ def fetchOut(k, user, slug, dest, lim):
             s = logSeconds(p)
             maxSec = max(maxSec or 0, s) if s is not None else maxSec
         got.append([name, n])
-    writeJson(os.path.join(dest, '_manifest.json'), {'fetchedAt': now(), 'got': got, 'skipped': skip, 'totalBytes': total, 'listed': len(files)})
+    writeJson(os.path.join(dest, '_manifest.json'), {'fetchedAt': now(), 'got': got, 'skipped': skip, 'totalBytes': total, 'listed': len(files), 'sessionLog': bool(sessLog), 'kernelSec': maxSec})
     return got, skip, total, maxSec
 def usedH(jobs, owner, t):
     tot = 0.0
@@ -243,6 +262,7 @@ def main():
     state = readJson(statePath, {}) or {}
     jobs = state.setdefault('jobs', {})
     runs = state.setdefault('runs', [])
+    seen = state.setdefault('seen', {})
     owners = plan.get('owners', {})
     prefix = plan.get('prefix', 'st-')
     maxBusy, maxBusyCpu = int(plan.get('maxBusy', 2)), int(plan.get('maxBusyCpu', 2))
@@ -266,7 +286,7 @@ def main():
     except Exception as e:
         mine, unknown = {}, True
         log('kernel list failed, treated as unknown:', short(e))
-    cutoff = (dt.datetime.utcnow() - dt.timedelta(hours=windowH)).strftime(fmt)
+    cutoff = (dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) - dt.timedelta(hours=windowH)).strftime(fmt)
     live = {}
     for slug, info in sorted(mine.items()):
         st = jobs.get(slug)
@@ -274,16 +294,22 @@ def main():
             continue
         if st and st.get('status') in termStates and st.get('lastRunTime') == info['lastRunTime']:
             continue
+        sn = seen.get(slug)
+        if not st and slug not in specs and sn and sn.get('status') in termStates and sn.get('lastRunTime') == info['lastRunTime']:
+            continue
         try:
             s, msg = statusOf(k, f'{user}/{slug}')
         except Exception as e:
             unknown = True
             log(slug, 'status failed, treated as unknown:', short(e))
             continue
-        live[slug] = (s, info['gpu'])
+        gpu = gpuOf(src, slug, specs, jobs)
+        live[slug] = (s, gpu)
+        if not st and slug not in specs:
+            seen[slug] = {'status': s, 'statusAt': t, 'lastRunTime': info['lastRunTime']}
         if not st and slug in specs:
             sp = specs[slug]
-            st = jobs[slug] = {'owner': sp.get('owner'), 'gpu': info['gpu'], 'needH': sp.get('needH', 0), 'timeoutSec': sp.get('timeoutSec'), 'pushedAt': info['lastRunTime'] or t, 'adopted': True, 'adoptedAt': t}
+            st = jobs[slug] = {'owner': sp.get('owner'), 'gpu': gpu, 'needH': sp.get('needH', 0), 'timeoutSec': sp.get('timeoutSec'), 'pushedAt': info['lastRunTime'] or t, 'adopted': True, 'adoptedAt': t}
             acts.append('adopted ' + slug)
             log(slug, 'adopted (already on the account)')
         if st:
