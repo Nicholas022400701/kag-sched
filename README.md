@@ -36,7 +36,8 @@ Job lists are merged in this order: `plan.json` `jobs`, then `orch/plan/*.json`,
   "activeWindowH": 24,
   "maxTextMB": 20,
   "maxImgMB": 5,
-  "maxTotalMB": 50,
+  "maxTotalMB": 20,
+  "fetchSkip": ["frames/**", "*.mp4", "*.npy", "*.pt", "*.ckpt", "*.tar"],
   "forbidden": ["regex", "checked case-insensitively against every kernel file before push"],
   "owners": {
     "B": {"budgetH": 12, "maxConcurrent": 2, "priority": 0, "resultsDir": "results/r2"},
@@ -44,7 +45,8 @@ Job lists are merged in this order: `plan.json` `jobs`, then `orch/plan/*.json`,
   },
   "jobs": [
     {"id": "st-example-01", "kernelDir": "orch/kernels/st-example-01", "owner": "A",
-     "needH": 1.5, "timeoutSec": 7200, "deps": [], "priority": 0, "resume": false}
+     "needH": 1.5, "timeoutSec": 7200, "deps": [], "priority": 0, "resume": false,
+     "fetchSkip": ["out/**/*.png"]}
   ]
 }
 ```
@@ -59,6 +61,7 @@ Job lists are merged in this order: `plan.json` `jobs`, then `orch/plan/*.json`,
 | `deps` | job ids that must be `COMPLETE` before this job may be pushed |
 | `priority` | lower runs first inside an owner; owners are ordered by their own `priority` |
 | `resume` | `true`: after `ERROR` or `CANCEL_ACKNOWLEDGED`, create `<id>-r1` once, same kernel files, with the failed kernel added to `kernel_sources` so its output is mounted under `/kaggle/input/<id>/`; the kernel code decides what to do with it |
+| `fetchSkip` | extra glob patterns for output files that stay on Kaggle (added to the global `fetchSkip`) |
 
 Rules applied to every push: `enable_gpu` from the job's `kernel-metadata.json` decides whether a job is a GPU job (the Kaggle list endpoint does not report the accelerator, so kernels on the account that are not in the plan are counted as GPU sessions). GPU jobs need `gpuBusy < maxBusy`, `quota.remainH - reserved >= max(minRemainH, needH)` (`reserved` = the not-yet-elapsed part of `needH` of jobs still running) and `owner used + needH <= budgetH`. CPU jobs only need a free CPU slot. `used` counts finished jobs by kernel wall clock and running jobs by `max(elapsed, needH)`.
 
@@ -72,7 +75,7 @@ A job whose slug already exists on the account is **adopted**, never pushed agai
 
 ## Fetched outputs
 
-Only `.json .md .txt .csv .log` (each up to `maxTextMB`) and `.png .jpg .jpeg .webp .gif .svg` (each up to `maxImgMB`) are downloaded, `maxTotalMB` in total per kernel. Everything else is listed as skipped in `_manifest.json`. The account name is replaced by `<u>` inside text outputs.
+Only `.json .md .txt .csv .log` (each up to `maxTextMB`) and `.png .jpg .jpeg .webp .gif .svg` (each up to `maxImgMB`) are downloaded, `maxTotalMB` in total per kernel. Files matching a `fetchSkip` glob are not downloaded at all: the global list in `plan.json` (default `frames/**`, `*.mp4`, `*.npy`, `*.pt`, `*.ckpt`, `*.tar`) plus the job's own list. A pattern is tested case-insensitively against the file path and every trailing sub-path (`frames/**` matches `out/frames/0001.jpg`; `*` and `**` both cross `/`; `out/**/*.png` matches `out/figs/a.png` but not `out/a.png`). Everything else is listed as skipped in `_manifest.json` with the reason (`type`, `size`, `total`, `fetchSkip`). The account name is replaced by `<u>` inside text outputs. A kernel is fetched once; changing `fetchSkip` later does not re-fetch it.
 
 ## Setup
 
@@ -87,6 +90,18 @@ Only `.json .md .txt .csv .log` (each up to `maxTextMB`) and `.png .jpg .jpeg .w
 6. Add the secrets before the first scheduled tick: a scheduled run without them fails at the first step and GitHub mails the owner about every failed run.
 
 Local use: `KAGGLE_API_TOKEN=… KAGGLE_USER=… SRC_DIR=/path/to/private/checkout python3 sched.py --dry-run`.
+
+## If the cron does not fire
+
+A freshly added or changed `schedule` usually starts 15–60 min late, and GitHub drops scheduled runs at peak load (the start of every hour is the worst). Check in this order; each step is one look, no code change:
+
+1. *Actions* tab → filter by event `schedule`: is there any run at all? Scheduled runs only appear from the **default branch** and only for the workflow file on that branch (`git ls-remote origin HEAD` must point at the branch that holds `.github/workflows/sched.yml`).
+2. *Actions* tab → *sched* → the workflow must not show *This scheduled workflow is disabled* (GitHub disables schedules after 60 days without a commit, and in every fork by default). Re-enable with the button, or push any commit to the default branch.
+3. *Settings → Actions → General*: *Allow all actions and reusable workflows* (or at least GitHub-owned ones) and *Workflow permissions* not blocked at the account or organization level.
+4. `GET /repos/<owner>/<repo>/actions/workflows` → `state` must be `active`; `disabled_manually` / `disabled_inactivity` explain themselves.
+5. The workflow parses: the cron string is quoted (`- cron: '*/15 * * * *'`), five fields, UTC. A YAML error shows up as a failed `workflow_dispatch` run or as a red *sched* entry in the Actions tab.
+6. If everything above is fine and nothing ran for two full intervals, edit and push the workflow file (a whitespace change is enough); GitHub re-registers the schedule on every change of the file.
+7. Hand-run with *Run workflow* to check the pipeline itself, but do not use it as a timer: a dispatch that overlaps a late scheduled run just queues behind it (`concurrency: sched`), and two rounds in a row burn Kaggle API calls for nothing.
 
 ## Limits
 

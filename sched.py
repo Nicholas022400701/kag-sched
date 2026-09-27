@@ -2,12 +2,14 @@
 Env: KAGGLE_API_TOKEN (used by the kaggle client), KAGGLE_USER (kernel owner), SRC_DIR (checkout that holds orch/plan.json).
 Reads  <SRC_DIR>/orch/plan.json (owners, limits, optional jobs), every <SRC_DIR>/orch/plan/*.json and <SRC_DIR>/orch/jobs/*.json (job lists, one file per team member; a JSON array or {"jobs": [...]}) and <SRC_DIR>/orch/state.json.
 Kernels outside the plan are remembered in state.seen so finished ones are not queried again.
+Output files matching plan.fetchSkip (global) or the job's fetchSkip (globs, matched against the path and every trailing sub-path) stay on Kaggle.
 Writes <SRC_DIR>/orch/state.json, fetched outputs to <resultsDir>/raw/<slug>/, derived resume kernels to orch/kernels/.
 Kernels on the account that are not in the plan count as GPU sessions (the list endpoint does not report the accelerator).
 Log lines carry only kernel slugs, statuses, counts and hours. Everything printed passes a masker that hides the owner name and the token.
 Exit codes: 0 normal (API trouble is logged and treated as unknown), 2 missing configuration."""
 import argparse
 import datetime as dt
+import fnmatch
 import glob
 import hashlib
 import json
@@ -166,7 +168,12 @@ def logSeconds(p):
         return max(ts) if ts else None
     except Exception:
         return None
-def fetchOut(k, user, slug, dest, lim):
+defaultSkip = ['frames/**', '*.mp4', '*.npy', '*.pt', '*.ckpt', '*.tar']
+def skipMatch(name, pats):
+    parts = name.lower().split('/')
+    tails = ['/'.join(parts[i:]) for i in range(len(parts))]
+    return any(fnmatch.fnmatchcase(t, str(pt).lower()) for pt in pats for t in tails)
+def fetchOut(k, user, slug, dest, lim, pats):
     from kagglesdk.kernels.types.kernels_api_service import ApiListKernelSessionOutputRequest
     files, tok, sessLog = [], None, ''
     while True:
@@ -196,6 +203,9 @@ def fetchOut(k, user, slug, dest, lim):
         norm = os.path.normpath(name)
         if not name or norm.startswith('..') or os.path.isabs(norm):
             skip.append([name, 'path'])
+            continue
+        if skipMatch(norm, pats):
+            skip.append([name, 'fetchSkip'])
             continue
         ext = os.path.splitext(name)[1].lower()
         cap = lim['maxTextMB'] if ext in textExt else lim['maxImgMB'] if ext in imgExt else 0
@@ -354,7 +364,8 @@ def main():
             dest = os.path.join(src, od.get('resultsDir', os.path.join('results', str(st.get('owner')))), 'raw', slug)
             st['fetchTries'] = int(st.get('fetchTries', 0)) + 1
             try:
-                got, skip, total, maxSec = fetchOut(k, user, slug, dest, lim)
+                pats = list(plan.get('fetchSkip', defaultSkip)) + list(specs.get(slug, {}).get('fetchSkip', []))
+                got, skip, total, maxSec = fetchOut(k, user, slug, dest, lim, pats)
                 st['fetchedAt'], st['fetched'], st['skipped'], st['fetchedBytes'] = now(), [g[0] for g in got], [s[0] for s in skip], total
                 if maxSec is not None:
                     w = maxSec / 3600

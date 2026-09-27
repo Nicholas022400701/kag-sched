@@ -69,14 +69,16 @@ jobs:
           SRC_DIR: ${{ github.workspace }}/src
         run: |
           cd "$SRC_DIR"
+          git config user.name sched-bot
+          git config user.email sched-bot@users.noreply.github.com
           git add -A .
           if git diff --cached --quiet; then echo "nothing to write back"; exit 0; fi
           python3 "$GITHUB_WORKSPACE/scan.py" --staged
-          git -c user.name=sched-bot -c user.email=sched-bot@users.noreply.github.com commit -q -m "sched: round $(date -u +%Y-%m-%dT%H:%MZ)"
+          git commit -q -m "sched: round $(date -u +%Y-%m-%dT%H:%MZ)"
           auth=$(printf 'x-access-token:%s' "$SRC_REPO_PAT" | base64 -w0)
           for i in 1 2 3; do
             git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" fetch -q origin "$SRC_BRANCH"
-            if ! git rebase -q "origin/$SRC_BRANCH"; then git rebase --abort; echo "rebase conflict"; exit 1; fi
+            if ! git rebase -q "origin/$SRC_BRANCH"; then git rebase --abort || true; echo "rebase failed"; exit 1; fi
             if git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push -q origin "HEAD:$SRC_BRANCH"; then echo "written back"; exit 0; fi
             sleep 10
           done
