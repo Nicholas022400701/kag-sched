@@ -81,7 +81,7 @@ Only `.json .md .txt .csv .log` (each up to `maxTextMB`) and `.png .jpg .jpeg .w
    - `SRC_REPO_PAT` – fine-grained personal access token restricted to the private source repository with *Contents: read and write*.
 4. Put `orch/plan.json` (and an empty `{"jobs": {}, "runs": []}` as `orch/state.json`) into the source repository.
 5. Trigger the workflow once by hand (*Actions → sched → Run workflow*). `dryRun` shows the decisions without pushing or writing.
-6. The `schedule` trigger ships commented out in `sched.yml`; uncomment it once the secrets exist, otherwise every scheduled run fails at the first step and mails the owner.
+6. Add the secrets before the first scheduled tick: a scheduled run without them fails at the first step and GitHub mails the owner about every failed run.
 
 Local use: `KAGGLE_API_TOKEN=… KAGGLE_USER=… SRC_DIR=/path/to/private/checkout python3 sched.py --dry-run`.
 

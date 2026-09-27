@@ -1,8 +1,7 @@
 name: sched
 on:
-  # cron is switched on once the three secrets exist; until then every scheduled run would fail at the first step and mail the owner
-  # schedule:
-  #   - cron: '*/15 * * * *'
+  schedule:
+    - cron: '*/15 * * * *'
   workflow_dispatch:
     inputs:
       dryRun:
