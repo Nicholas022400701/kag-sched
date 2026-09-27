@@ -14,13 +14,16 @@ The scheduler holds no project code. Kernels, the job list and the results live 
 ## Layout expected in the private repository
 
 ```
-orch/plan.json        job list and limits (edited by people)
+orch/plan.json        limits and owners (edited by people; may also carry a "jobs" list)
+orch/plan/<X>.json    one job list per team member (a JSON array or {"jobs": [...]}); orch/jobs/*.json is read the same way
 orch/state.json       scheduler memory (written by the scheduler)
 orch/kernels/<slug>/  kernel-metadata.json + main.py (also where derived resume kernels are written)
 <resultsDir>/raw/<slug>/   fetched outputs, one directory per kernel slug, plus _manifest.json
 ```
 
 `kernelDir` may point anywhere inside the private repository; only `kernel-metadata.json` and the file named by its `code_file` are uploaded by the Kaggle client.
+
+Job lists are merged in this order: `plan.json` `jobs`, then `orch/plan/*.json`, then `orch/jobs/*.json`, each directory in file-name order. The first definition of an id wins and later duplicates are reported in the log. One file per person avoids the lost-update problem of several people rewriting one shared file.
 
 ## plan.json
 
@@ -79,7 +82,7 @@ Only `.json .md .txt .csv .log` (each up to `maxTextMB`) and `.png .jpg .jpeg .w
    - `KAGGLE_API_TOKEN` – Kaggle API token of the kernel owner;
    - `KAGGLE_USER` – the owner's Kaggle user name;
    - `SRC_REPO_PAT` – fine-grained personal access token restricted to the private source repository with *Contents: read and write*.
-4. Put `orch/plan.json` (and an empty `{"jobs": {}, "runs": []}` as `orch/state.json`) into the source repository.
+4. Put `orch/plan.json` (limits and owners; job lists may go into `orch/plan/<member>.json`) and an empty `{"jobs": {}, "runs": []}` as `orch/state.json` into the source repository.
 5. Trigger the workflow once by hand (*Actions → sched → Run workflow*). `dryRun` shows the decisions without pushing or writing.
 6. Add the secrets before the first scheduled tick: a scheduled run without them fails at the first step and GitHub mails the owner about every failed run.
 

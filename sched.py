@@ -1,6 +1,6 @@
 """Generic cron scheduler for Kaggle kernels. One polling round per run, then exit.
 Env: KAGGLE_API_TOKEN (used by the kaggle client), KAGGLE_USER (kernel owner), SRC_DIR (checkout that holds orch/plan.json).
-Reads  <SRC_DIR>/orch/plan.json (owners, limits, jobs) plus every <SRC_DIR>/orch/jobs/*.json (more job lists, one file per team member) and <SRC_DIR>/orch/state.json.
+Reads  <SRC_DIR>/orch/plan.json (owners, limits, optional jobs), every <SRC_DIR>/orch/plan/*.json and <SRC_DIR>/orch/jobs/*.json (job lists, one file per team member; a JSON array or {"jobs": [...]}) and <SRC_DIR>/orch/state.json.
 Kernels outside the plan are remembered in state.seen so finished ones are not queried again.
 Writes <SRC_DIR>/orch/state.json, fetched outputs to <resultsDir>/raw/<slug>/, derived resume kernels to orch/kernels/.
 Kernels on the account that are not in the plan count as GPU sessions (the list endpoint does not report the accelerator).
@@ -94,9 +94,10 @@ def gpuOf(src, slug, specs, jobs):
 def specsOf(src, plan, jobs):
     out, dup = {}, []
     lists = [('orch/plan.json', plan.get('jobs', []))]
-    for p in sorted(glob.glob(os.path.join(src, 'orch', 'jobs', '*.json'))):
-        d = readJson(p, [])
-        lists.append((os.path.relpath(p, src), d.get('jobs', []) if isinstance(d, dict) else d))
+    for sub in ('plan', 'jobs'):
+        for p in sorted(glob.glob(os.path.join(src, 'orch', sub, '*.json'))):
+            d = readJson(p, [])
+            lists.append((os.path.relpath(p, src), d.get('jobs', []) if isinstance(d, dict) else d))
     for name, arr in lists:
         for j in arr:
             if not isinstance(j, dict) or 'id' not in j:
