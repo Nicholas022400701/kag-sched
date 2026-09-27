@@ -8,18 +8,29 @@ on:
         description: 'Dry run: query and decide, push nothing, write nothing back'
         type: boolean
         default: false
+      loopMinutes:
+        description: 'Run a round every 15 min for this many minutes (0 = one round), then hand over to a self-dispatched next run'
+        type: string
+        default: '330'
+      nextLoopMinutes:
+        description: 'loopMinutes for the self-dispatched next run (empty = same as loopMinutes)'
+        type: string
+        default: ''
 permissions:
   contents: read
+  actions: write
 concurrency:
   group: sched
   cancel-in-progress: false
 env:
   SRC_REPO: Nicholas022400701/nndl-samam
   SRC_BRANCH: main
+  LOOP_MINUTES: ${{ github.event_name == 'workflow_dispatch' && inputs.loopMinutes || '0' }}
+  NEXT_LOOP_MINUTES: ${{ github.event_name == 'workflow_dispatch' && (inputs.nextLoopMinutes || inputs.loopMinutes) || '0' }}
 jobs:
   round:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 355
     steps:
       - name: Require and mask secrets
         env:
@@ -51,38 +62,22 @@ jobs:
       - name: Self scan of the public tree
         env:
           KAGGLE_USER: ${{ secrets.KAGGLE_USER }}
-        run: python3 scan.py --paths sched.py scan.py README.md SECURITY.md .github
-      - name: Run one scheduling round
+        run: python3 scan.py --paths sched.py scan.py chain.sh README.md SECURITY.md .github
+      - name: Scheduling rounds
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
           KAGGLE_USER: ${{ secrets.KAGGLE_USER }}
-          SRC_DIR: ${{ github.workspace }}/src
-          DRY_RUN: ${{ inputs.dryRun }}
-        run: |
-          if [ "$DRY_RUN" = "true" ]; then python3 sched.py --dry-run; else python3 sched.py; fi
-      - name: Scan and write back to the source repository
-        if: ${{ inputs.dryRun != true }}
-        env:
-          KAGGLE_USER: ${{ secrets.KAGGLE_USER }}
-          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
           SRC_REPO_PAT: ${{ secrets.SRC_REPO_PAT }}
           SRC_DIR: ${{ github.workspace }}/src
-        run: |
-          cd "$SRC_DIR"
-          git config user.name sched-bot
-          git config user.email sched-bot@users.noreply.github.com
-          git add -A .
-          if git diff --cached --quiet; then echo "nothing to write back"; exit 0; fi
-          python3 "$GITHUB_WORKSPACE/scan.py" --staged
-          git commit -q -m "sched: round $(date -u +%Y-%m-%dT%H:%MZ)"
-          auth=$(printf 'x-access-token:%s' "$SRC_REPO_PAT" | base64 -w0)
-          for i in 1 2 3; do
-            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" fetch -q origin "$SRC_BRANCH"
-            if ! git rebase -q "origin/$SRC_BRANCH"; then git rebase --abort || true; echo "rebase failed"; exit 1; fi
-            if git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push -q origin "HEAD:$SRC_BRANCH"; then echo "written back"; exit 0; fi
-            sleep 10
-          done
-          echo "push failed after 3 attempts"; exit 1
+          DRY_RUN: ${{ inputs.dryRun }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash chain.sh
+      - name: Dispatch the next run
+        if: always() && env.LOOP_MINUTES != '0' && env.LOOP_MINUTES != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dryRun }}
+        run: bash chain.sh dispatch
       - name: Remove source checkout
         if: always()
         run: rm -rf "$GITHUB_WORKSPACE/src"

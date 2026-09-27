@@ -1,6 +1,6 @@
 # Security notes
 
-This repository is public and runs on a cron schedule with three secrets. Measures in place:
+This repository is public and runs unattended (self-continuing `workflow_dispatch` chain plus a cron fallback) with three secrets. Measures in place:
 
 ## Secrets and logs
 - Secrets are read only from `secrets.*` and passed to steps as environment variables. They never appear in `run:` script text, so the step header cannot print them.
@@ -14,10 +14,11 @@ This repository is public and runs on a cron schedule with three secrets. Measur
 
 ## Workflow hardening
 - Triggers are `schedule` and `workflow_dispatch` only. No `pull_request`, `pull_request_target`, `issue_comment` or other event that could be driven by an outside contributor.
-- `permissions: contents: read` for the workflow's `GITHUB_TOKEN`; the private repository is reached only through the fine-grained token.
+- `permissions: contents: read, actions: write` for the workflow's `GITHUB_TOKEN`: `actions: write` is needed only to dispatch the successor run with `gh workflow run`; it cannot read secrets or write repository content. The private repository is reached only through the fine-grained token.
 - Both checkouts use `persist-credentials: false`; the push authenticates with a per-command `http.extraheader`, so no token is stored in `.git/config`.
 - Third-party actions are pinned to full commit SHAs (`actions/checkout` v4.2.2). The Python client is pinned (`kaggle==2.2.4`).
-- `concurrency` prevents overlapping rounds, `timeout-minutes: 20` bounds each run.
+- `concurrency` prevents overlapping runs (a dispatched successor waits as *pending*), `timeout-minutes: 355` bounds each chain run; `chain.sh` stops starting rounds when the next one would exceed `loopMinutes`.
+- `chain.sh` prints round numbers, timestamps, git result words and `gh` messages only; the `git` authentication header is passed per command and never written to disk.
 - No artifacts, caches or job summaries are produced; the private checkout is deleted in a final `always()` step.
 
 ## Recommended settings for the public repository
