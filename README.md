@@ -57,7 +57,7 @@ orch/kernels/<slug>/  kernel-metadata.json + main.py (also where derived resume 
 | `priority` | lower runs first inside an owner; owners are ordered by their own `priority` |
 | `resume` | `true`: after `ERROR` or `CANCEL_ACKNOWLEDGED`, create `<id>-r1` once, same kernel files, with the failed kernel added to `kernel_sources` so its output is mounted under `/kaggle/input/<id>/`; the kernel code decides what to do with it |
 
-Rules applied to every push: `enable_gpu` from the metadata decides whether a job is a GPU job. GPU jobs need `gpuBusy < maxBusy`, `quota.remainH - reserved >= max(minRemainH, needH)` (`reserved` = the not-yet-elapsed part of `needH` of jobs still running) and `owner used + needH <= budgetH`. CPU jobs only need a free CPU slot. `used` counts finished jobs by kernel wall clock and running jobs by `max(elapsed, needH)`.
+Rules applied to every push: `enable_gpu` from the job's `kernel-metadata.json` decides whether a job is a GPU job (the Kaggle list endpoint does not report the accelerator, so kernels on the account that are not in the plan are counted as GPU sessions). GPU jobs need `gpuBusy < maxBusy`, `quota.remainH - reserved >= max(minRemainH, needH)` (`reserved` = the not-yet-elapsed part of `needH` of jobs still running) and `owner used + needH <= budgetH`. CPU jobs only need a free CPU slot. `used` counts finished jobs by kernel wall clock and running jobs by `max(elapsed, needH)`.
 
 Wall clock of a finished kernel: the last `"time"` stamp of the downloaded kernel log when present (this is the kernel's own run time), otherwise push time to the first round that saw the terminal state (up to one cron interval too long). A `CANCEL_ACKNOWLEDGED` job with a timeout counts at least its timeout.
 
@@ -81,6 +81,7 @@ Only `.json .md .txt .csv .log` (each up to `maxTextMB`) and `.png .jpg .jpeg .w
    - `SRC_REPO_PAT` – fine-grained personal access token restricted to the private source repository with *Contents: read and write*.
 4. Put `orch/plan.json` (and an empty `{"jobs": {}, "runs": []}` as `orch/state.json`) into the source repository.
 5. Trigger the workflow once by hand (*Actions → sched → Run workflow*). `dryRun` shows the decisions without pushing or writing.
+6. The `schedule` trigger ships commented out in `sched.yml`; uncomment it once the secrets exist, otherwise every scheduled run fails at the first step and mails the owner.
 
 Local use: `KAGGLE_API_TOKEN=… KAGGLE_USER=… SRC_DIR=/path/to/private/checkout python3 sched.py --dry-run`.
 
