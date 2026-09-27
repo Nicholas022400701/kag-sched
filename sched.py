@@ -1,6 +1,6 @@
 """Generic cron scheduler for Kaggle kernels. One polling round per run, then exit.
 Env: KAGGLE_API_TOKEN (used by the kaggle client), KAGGLE_USER (kernel owner), SRC_DIR (checkout that holds orch/plan.json).
-Reads  <SRC_DIR>/orch/plan.json (job list, owners, limits) and <SRC_DIR>/orch/state.json.
+Reads  <SRC_DIR>/orch/plan.json (owners, limits, jobs) plus every <SRC_DIR>/orch/jobs/*.json (more job lists, one file per team member) and <SRC_DIR>/orch/state.json.
 Kernels outside the plan are remembered in state.seen so finished ones are not queried again.
 Writes <SRC_DIR>/orch/state.json, fetched outputs to <resultsDir>/raw/<slug>/, derived resume kernels to orch/kernels/.
 Kernels on the account that are not in the plan count as GPU sessions (the list endpoint does not report the accelerator).
@@ -91,13 +91,25 @@ def gpuOf(src, slug, specs, jobs):
         if m is not None:
             return bool(m.get('enable_gpu', False))
     return True
-def specsOf(plan, jobs):
-    out = {}
-    for j in plan.get('jobs', []):
-        out[j['id']] = dict(j)
+def specsOf(src, plan, jobs):
+    out, dup = {}, []
+    lists = [('orch/plan.json', plan.get('jobs', []))]
+    for p in sorted(glob.glob(os.path.join(src, 'orch', 'jobs', '*.json'))):
+        d = readJson(p, [])
+        lists.append((os.path.relpath(p, src), d.get('jobs', []) if isinstance(d, dict) else d))
+    for name, arr in lists:
+        for j in arr:
+            if not isinstance(j, dict) or 'id' not in j:
+                continue
+            if j['id'] in out:
+                dup.append(f"{j['id']} ({name})")
+                continue
+            out[j['id']] = dict(j, source=name)
     for sid, st in jobs.items():
         if st.get('spec') and sid not in out:
             out[sid] = dict(st['spec'])
+    if dup:
+        log('duplicate job ids ignored (first definition wins):', ' '.join(dup))
     return out
 def kernelCheck(src, user, spec, forbidden, prefix):
     if not spec['id'].startswith(prefix):
@@ -270,8 +282,11 @@ def main():
     windowH = a.window or float(plan.get('activeWindowH', 24))
     forbidden = plan.get('forbidden', [])
     lim = {'maxTextMB': float(plan.get('maxTextMB', 20)), 'maxImgMB': float(plan.get('maxImgMB', 5)), 'maxTotalMB': float(plan.get('maxTotalMB', 50))}
-    specs = specsOf(plan, jobs)
+    specs = specsOf(src, plan, jobs)
     t = now()
+    for slug, st in jobs.items():
+        if st.get('adopted') and st.get('status') in termStates and not st.get('wallSource') and slug in specs:
+            st['wallH'], st['wallSource'] = float(specs[slug].get('needH') or 0), 'needH (adopted, until the kernel log is fetched)'
     acts, unknown = [], False
     k = api()
     try:
@@ -290,7 +305,8 @@ def main():
     live = {}
     for slug, info in sorted(mine.items()):
         st = jobs.get(slug)
-        if info['lastRunTime'] and info['lastRunTime'] < cutoff and not (st and st.get('status') not in termStates and not st.get('blocked')):
+        needAdopt = not st and slug in specs
+        if info['lastRunTime'] and info['lastRunTime'] < cutoff and not needAdopt and not (st and st.get('status') not in termStates and not st.get('blocked')):
             continue
         if st and st.get('status') in termStates and st.get('lastRunTime') == info['lastRunTime']:
             continue
@@ -317,7 +333,10 @@ def main():
             st['failureMessage'] = msg
             if s in termStates and not st.get('endedAt'):
                 st['endedAt'] = t
-                st['wallH'] = hoursBetween(st['pushedAt'], t) if st.get('pushedAt') else None
+                if st.get('adopted'):
+                    st['wallH'], st['wallSource'] = float(st.get('needH') or 0), 'needH (adopted, until the kernel log is fetched)'
+                else:
+                    st['wallH'], st['wallSource'] = (hoursBetween(st['pushedAt'], t) if st.get('pushedAt') else None), 'push to first terminal observation'
                 if s == 'CANCEL_ACKNOWLEDGED' and st.get('timeoutSec'):
                     st['wallH'] = round(max(st['wallH'] or 0, float(st['timeoutSec']) / 3600), 3)
                 acts.append(f'{slug} {s}')
@@ -412,6 +431,16 @@ def main():
         if a.dry_run:
             log(slug, 'would push (dry run)')
             continue
+        try:
+            s0, _ = statusOf(k, f'{user}/{slug}')
+            st.update({'status': s0, 'statusAt': t, 'pushedAt': t, 'adopted': True, 'adoptedAt': t, 'gpu': gpu, 'note': 'existed on the account before the first push attempt'})
+            acts.append('adopted ' + slug)
+            log(slug, 'exists on the account already, adopted instead of pushed:', s0)
+            continue
+        except Exception as e:
+            if '429' in str(e) or 'Too Many' in str(e):
+                log(slug, 'not pushed: existence probe rate limited')
+                continue
         try:
             r = k.kernels_push(kd, timeout=str(int(sp['timeoutSec'])) if sp.get('timeoutSec') else None)
             err = getattr(r, 'error', None)
