@@ -2,6 +2,7 @@
 Env: KAGGLE_API_TOKEN (used by the kaggle client), KAGGLE_USER (kernel owner), SRC_DIR (checkout that holds orch/plan.json).
 Reads  <SRC_DIR>/orch/plan.json (owners, limits, optional jobs), every <SRC_DIR>/orch/plan/*.json and <SRC_DIR>/orch/jobs/*.json (job lists, one file per team member; a JSON array or {"jobs": [...]}) and <SRC_DIR>/orch/state.json.
 Kernels outside the plan are remembered in state.seen so finished ones are not queried again.
+A job with "adopt": true is never pushed; it is adopted as soon as its slug appears on the account (for kernels that people push by hand).
 Output files matching plan.fetchSkip (global) or the job's fetchSkip (globs, matched against the path and every trailing sub-path) stay on Kaggle.
 Writes <SRC_DIR>/orch/state.json, fetched outputs to <resultsDir>/raw/<slug>/, derived resume kernels to orch/kernels/.
 Kernels on the account that are not in the plan count as GPU sessions (the list endpoint does not report the accelerator).
@@ -316,10 +317,10 @@ def main():
     live = {}
     for slug, info in sorted(mine.items()):
         st = jobs.get(slug)
-        needAdopt = not st and slug in specs
+        needAdopt = slug in specs and not (st or {}).get('pushedAt')
         if info['lastRunTime'] and info['lastRunTime'] < cutoff and not needAdopt and not (st and st.get('status') not in termStates and not st.get('blocked')):
             continue
-        if st and st.get('status') in termStates and st.get('lastRunTime') == info['lastRunTime']:
+        if st and not needAdopt and st.get('status') in termStates and st.get('lastRunTime') == info['lastRunTime']:
             continue
         sn = seen.get(slug)
         if not st and slug not in specs and sn and sn.get('status') in termStates and sn.get('lastRunTime') == info['lastRunTime']:
@@ -334,9 +335,10 @@ def main():
         live[slug] = (s, gpu)
         if not st and slug not in specs:
             seen[slug] = {'status': s, 'statusAt': t, 'lastRunTime': info['lastRunTime']}
-        if not st and slug in specs:
+        if needAdopt:
             sp = specs[slug]
-            st = jobs[slug] = {'owner': sp.get('owner'), 'gpu': gpu, 'needH': sp.get('needH', 0), 'timeoutSec': sp.get('timeoutSec'), 'pushedAt': info['lastRunTime'] or t, 'adopted': True, 'adoptedAt': t}
+            st = jobs[slug] = {k2: v for k2, v in (st or {}).items() if not k2.startswith('blocked')}
+            st.update(owner=sp.get('owner'), gpu=gpu, needH=sp.get('needH', 0), timeoutSec=sp.get('timeoutSec'), pushedAt=info['lastRunTime'] or t, adopted=True, adoptedAt=t)
             acts.append('adopted ' + slug)
             log(slug, 'adopted (already on the account)')
         if st:
@@ -397,6 +399,9 @@ def main():
     for sp in cands:
         slug = sp['id']
         st = jobs.setdefault(slug, {'owner': sp.get('owner'), 'needH': sp.get('needH', 0), 'timeoutSec': sp.get('timeoutSec')})
+        if sp.get('adopt'):
+            log(slug, 'manual job, waiting to adopt')
+            continue
         deps = [d for d in sp.get('deps', []) if jobs.get(d, {}).get('status') != 'COMPLETE']
         if deps:
             log(slug, 'waiting for', ' '.join(deps))

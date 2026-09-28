@@ -19,9 +19,6 @@ on:
 permissions:
   contents: read
   actions: write
-concurrency:
-  group: sched
-  cancel-in-progress: false
 env:
   SRC_REPO: Nicholas022400701/nndl-samam
   SRC_BRANCH: main
@@ -29,8 +26,12 @@ env:
   NEXT_LOOP_MINUTES: ${{ github.event_name == 'workflow_dispatch' && (inputs.nextLoopMinutes || inputs.loopMinutes) || '0' }}
 jobs:
   round:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 355
+    concurrency:
+      group: sched
+      cancel-in-progress: false
     steps:
       - name: Require and mask secrets
         env:
@@ -81,3 +82,19 @@ jobs:
       - name: Remove source checkout
         if: always()
         run: rm -rf "$GITHUB_WORKSPACE/src"
+  watchdog:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: watchdog
+      cancel-in-progress: false
+    steps:
+      - name: Checkout scheduler
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Restart the chain if no chain run is alive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash chain.sh watchdog

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs scheduling rounds every 15 min inside one job (LOOP_MINUTES), writes results back after each round,
-# and keeps exactly one successor run queued (a pending cron run does not count: dispatching replaces it under the concurrency group).
-# `chain.sh dispatch` only does the hand-over.
+# and keeps exactly one successor run queued. `chain.sh dispatch` only does the hand-over.
+# `chain.sh watchdog` (cron job, no secrets) starts a new chain when no workflow_dispatch run is queued, pending or in progress.
 # Env: SRC_DIR, SRC_BRANCH, SRC_REPO_PAT, DRY_RUN, LOOP_MINUTES, NEXT_LOOP_MINUTES, GH_TOKEN, GITHUB_REPOSITORY, GITHUB_RUN_ID, GITHUB_WORKSPACE.
 set -u
 here="${GITHUB_WORKSPACE:-$(cd "$(dirname "$0")" && pwd)}"
@@ -11,20 +11,37 @@ nextMin=$(num "${NEXT_LOOP_MINUTES:-$loopMin}")
 sleepSec="${SLEEP_SEC:-900}"
 loopSec="${LOOP_SEC:-$((loopMin * 60))}"
 gitAuth() { git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" "$@"; }
-dispatch() {
-  [ "$loopMin" -gt 0 ] || return 0
-  if [ "${DRY_RUN:-false}" = "true" ]; then echo "dry run: no hand-over"; return 0; fi
-  others=$(gh run list -R "$GITHUB_REPOSITORY" -w sched.yml -L 30 --json databaseId,status,event \
-    -q "[.[] | select(.status != \"completed\" and .event == \"workflow_dispatch\" and (.databaseId|tostring) != \"$GITHUB_RUN_ID\")] | length" 2>/dev/null || echo "?")
-  if [ "$others" != "0" ] && [ "$others" != "?" ]; then echo "next run already queued or running ($others), not dispatching"; return 0; fi
-  [ "$others" = "?" ] && echo "run list unavailable, dispatching anyway"
-  if gh workflow run sched.yml -R "$GITHUB_REPOSITORY" -f loopMinutes="$nextMin" -f dryRun=false; then
-    echo "dispatched the next run (loopMinutes $nextMin)"
+liveRuns() {
+  gh run list -R "$GITHUB_REPOSITORY" -w sched.yml -e workflow_dispatch -L 30 --json databaseId,status,event \
+    -q "[.[] | select(.status != \"completed\" and .event == \"workflow_dispatch\" and (.databaseId|tostring) != \"$GITHUB_RUN_ID\")] | length" 2>/dev/null || echo "?"
+}
+startRun() {
+  if gh workflow run sched.yml -R "$GITHUB_REPOSITORY" -f loopMinutes="$1" -f dryRun=false; then
+    echo "dispatched the next run (loopMinutes $1)"
   else
     echo "dispatch failed"
   fi
 }
-if [ "${1:-}" = "dispatch" ]; then dispatch; exit 0; fi
+dispatch() {
+  [ "$loopMin" -gt 0 ] || return 0
+  if [ "${DRY_RUN:-false}" = "true" ]; then echo "dry run: no hand-over"; return 0; fi
+  others=$(liveRuns)
+  if [ "$others" != "0" ] && [ "$others" != "?" ]; then echo "next run already queued or running ($others), not dispatching"; return 0; fi
+  [ "$others" = "?" ] && echo "run list unavailable, dispatching anyway"
+  startRun "$nextMin"
+}
+watchdog() {
+  others=$(liveRuns)
+  case "$others" in
+    '?') echo "run list unavailable, not dispatching" ;;
+    0) echo "no chain run alive"; startRun "${WATCHDOG_LOOP_MINUTES:-330}" ;;
+    *) echo "chain alive ($others run(s) queued or in progress)" ;;
+  esac
+}
+case "${1:-}" in
+  dispatch) dispatch; exit 0 ;;
+  watchdog) watchdog; exit 0 ;;
+esac
 auth=$(printf 'x-access-token:%s' "$SRC_REPO_PAT" | base64 -w0)
 start=$(date +%s)
 cd "$SRC_DIR"

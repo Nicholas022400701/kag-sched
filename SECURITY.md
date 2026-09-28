@@ -1,10 +1,10 @@
 # Security notes
 
-This repository is public and runs unattended (self-continuing `workflow_dispatch` chain plus a cron fallback) with three secrets. Measures in place:
+This repository is public and runs unattended (a self-continuing `workflow_dispatch` chain plus a cron watchdog that only restarts the chain) with three secrets. Measures in place:
 
 ## Secrets and logs
 - Secrets are read only from `secrets.*` and passed to steps as environment variables. They never appear in `run:` script text, so the step header cannot print them.
-- The first step fails the job if any of `KAGGLE_API_TOKEN`, `KAGGLE_USER`, `SRC_REPO_PAT` is empty and registers each value with `::add-mask::`, together with the upper-cased user name and the base64 form of the token used for `git push`. GitHub additionally masks every `secrets.*` value on its own.
+- The chain job's first step fails the job if any of `KAGGLE_API_TOKEN`, `KAGGLE_USER`, `SRC_REPO_PAT` is empty and registers each value with `::add-mask::`, together with the upper-cased user name and the base64 form of the token used for `git push`. GitHub additionally masks every `secrets.*` value on its own.
 - `sched.py` wraps `stdout`/`stderr` in a masker that replaces the Kaggle user name and the token with `<u>` in everything it or the Kaggle client prints, and it never prints kernel URLs, dataset names, owner-qualified refs or error bodies longer than 160 characters.
 - Text outputs downloaded from Kaggle are rewritten with the user name replaced before they are committed.
 
@@ -14,10 +14,11 @@ This repository is public and runs unattended (self-continuing `workflow_dispatc
 
 ## Workflow hardening
 - Triggers are `schedule` and `workflow_dispatch` only. No `pull_request`, `pull_request_target`, `issue_comment` or other event that could be driven by an outside contributor.
-- `permissions: contents: read, actions: write` for the workflow's `GITHUB_TOKEN`: `actions: write` is needed only to dispatch the successor run with `gh workflow run`; it cannot read secrets or write repository content. The private repository is reached only through the fine-grained token.
-- Both checkouts use `persist-credentials: false`; the push authenticates with a per-command `http.extraheader`, so no token is stored in `.git/config`.
+- `permissions: contents: read, actions: write` for the workflow's `GITHUB_TOKEN`: `actions: write` is needed only to start runs with `gh workflow run` (the chain's successor, the watchdog's restart); it cannot read secrets or write repository content. The private repository is reached only through the fine-grained token.
+- The cron job (`watchdog`) checks out only this repository, receives no secret, runs no round and calls just `gh run list` and, when no chain run is alive, `gh workflow run`.
+- All checkouts use `persist-credentials: false`; the push authenticates with a per-command `http.extraheader`, so no token is stored in `.git/config`.
 - Third-party actions are pinned to full commit SHAs (`actions/checkout` v4.2.2). The Python client is pinned (`kaggle==2.2.4`).
-- `concurrency` prevents overlapping runs (a dispatched successor waits as *pending*), `timeout-minutes: 355` bounds each chain run; `chain.sh` stops starting rounds when the next one would exceed `loopMinutes`.
+- Job-level `concurrency` groups: `sched` for the chain job (a dispatched successor waits as *pending*; a cron run never enters this group, so it cannot replace the successor) and `watchdog` for the cron job. `timeout-minutes: 355` bounds each chain run and 5 the watchdog; `chain.sh` stops starting rounds when the next one would exceed `loopMinutes`.
 - `chain.sh` prints round numbers, timestamps, git result words and `gh` messages only; the `git` authentication header is passed per command and never written to disk.
 - No artifacts, caches or job summaries are produced; the private checkout is deleted in a final `always()` step.
 
