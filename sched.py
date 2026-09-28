@@ -3,6 +3,7 @@ Env: KAGGLE_API_TOKEN (used by the kaggle client), KAGGLE_USER (kernel owner), S
 Reads  <SRC_DIR>/orch/plan.json (owners, limits, optional jobs), every <SRC_DIR>/orch/plan/*.json and <SRC_DIR>/orch/jobs/*.json (job lists, one file per team member; a JSON array or {"jobs": [...]}) and <SRC_DIR>/orch/state.json.
 Kernels outside the plan are remembered in state.seen so finished ones are not queried again.
 A job with "adopt": true is never pushed; it is adopted as soon as its slug appears on the account (for kernels that people push by hand).
+Unpushed entries take owner/needH/timeoutSec from the plan every round; a derived resume job that was not pushed yet is withdrawn when its parent no longer declares resume.
 Output files matching plan.fetchSkip (global) or the job's fetchSkip (globs, matched against the path and every trailing sub-path) stay on Kaggle.
 Writes <SRC_DIR>/orch/state.json, fetched outputs to <resultsDir>/raw/<slug>/, derived resume kernels to orch/kernels/.
 Kernels on the account that are not in the plan count as GPU sessions (the list endpoint does not report the accelerator).
@@ -295,6 +296,10 @@ def main():
     forbidden = plan.get('forbidden', [])
     lim = {'maxTextMB': float(plan.get('maxTextMB', 20)), 'maxImgMB': float(plan.get('maxImgMB', 5)), 'maxTotalMB': float(plan.get('maxTotalMB', 50))}
     specs = specsOf(src, plan, jobs)
+    for sid in [s2 for s2, st in jobs.items() if st.get('resumeOf') and not st.get('pushedAt') and not specs.get(st['resumeOf'], {}).get('resume')]:
+        del jobs[sid]
+        specs.pop(sid, None)
+        log(sid, 'resume job withdrawn: its parent no longer declares resume')
     t = now()
     for slug, st in jobs.items():
         if st.get('adopted') and st.get('status') in termStates and not st.get('wallSource') and slug in specs:
@@ -398,7 +403,8 @@ def main():
     pushed = 0
     for sp in cands:
         slug = sp['id']
-        st = jobs.setdefault(slug, {'owner': sp.get('owner'), 'needH': sp.get('needH', 0), 'timeoutSec': sp.get('timeoutSec')})
+        st = jobs.setdefault(slug, {})
+        st.update(owner=sp.get('owner'), needH=sp.get('needH', 0), timeoutSec=sp.get('timeoutSec'))
         if sp.get('adopt'):
             log(slug, 'manual job, waiting to adopt')
             continue

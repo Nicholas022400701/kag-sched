@@ -71,13 +71,15 @@ Job lists are merged in this order: `plan.json` `jobs`, then `orch/plan/*.json`,
 | `timeoutSec` | passed to the Kaggle push as the kernel timeout |
 | `deps` | job ids that must be `COMPLETE` before this job may be pushed |
 | `priority` | lower runs first inside an owner; owners are ordered by their own `priority` |
-| `resume` | `true`: after `ERROR` or `CANCEL_ACKNOWLEDGED`, create `<id>-r1` once, same kernel files, with the failed kernel added to `kernel_sources` so its output is mounted under `/kaggle/input/<id>/`; the kernel code decides what to do with it |
+| `resume` | `true`: after `ERROR` or `CANCEL_ACKNOWLEDGED`, create `<id>-r1` once, same kernel files, with the failed kernel added to `kernel_sources` so its output is mounted under `/kaggle/input/<id>/`; the kernel code decides what to do with it. Setting it back to `false` withdraws a derived job that has not been pushed yet |
 | `adopt` | `true`: the scheduler never pushes this job; it only adopts the kernel once the slug exists on the account (budget, slots, fetch and resume then work as for a pushed job). For kernels that a person pushes by hand: commit the entry first, push second |
 | `fetchSkip` | extra glob patterns for output files that stay on Kaggle (added to the global `fetchSkip`) |
 
 Rules applied to every push: `enable_gpu` from the job's `kernel-metadata.json` decides whether a job is a GPU job (the Kaggle list endpoint does not report the accelerator, so kernels on the account that are not in the plan are counted as GPU sessions). GPU jobs need `gpuBusy < maxBusy`, `quota.remainH - reserved >= max(minRemainH, needH)` (`reserved` = the not-yet-elapsed part of `needH` of jobs still running) and `owner used + needH <= budgetH`. CPU jobs only need a free CPU slot. `used` counts finished jobs by kernel wall clock and running jobs by `max(elapsed, needH)`.
 
 Wall clock of a finished kernel: the last `"time"` stamp of the downloaded kernel log when present (this is the kernel's own run time), otherwise push time to the first round that saw the terminal state (up to one cron interval too long). A `CANCEL_ACKNOWLEDGED` job with a timeout counts at least its timeout.
+
+An entry that has not been pushed takes `owner`, `needH` and `timeoutSec` from the plan every round, so plan edits count immediately; a pushed job keeps the values it was pushed with.
 
 A job whose slug already exists on the account is **adopted**, never pushed again. That makes the scheduler safe to run next to manual pushes and safe after losing `state.json`. The other direction needs discipline: a plan entry without `adopt` is pushed by the scheduler as soon as it is runnable, so a kernel that a person wants to push by hand must be committed with `"adopt": true` before the manual push, otherwise both push it.
 
