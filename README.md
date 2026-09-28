@@ -113,6 +113,7 @@ Local use: `KAGGLE_API_TOKEN=… KAGGLE_USER=… SRC_DIR=/path/to/private/checko
 - A `round` run failed at *Require and mask secrets*: a secret is missing or the fine-grained token expired. Fix the secret; the watchdog restarts the chain at the next tick.
 - `write-back failed` or `rebase failed` in the log: the source branch moved between fetch and push three times in a row; the next round redoes the write-back.
 - `scan hit: this round is not written back`: a fetched output or the state contains a token-like string or the user name. Nothing of that round was kept, so it repeats every round until the file is excluded with a `fetchSkip` pattern in the plan.
+- A kernel has to be stopped (a double push left an older version running, a job hangs): the API cannot do it. `cancel_kernel_session` needs the session id, and Kaggle exposes that id only after the session has ended (in the `kf/<id>/` part of the output-file URLs); the output list of a running session is empty and the live log stream carries no id (tested with a CPU probe kernel). Stop the session on the Kaggle web page; the next round records `CANCEL_ACKNOWLEDGED`.
 - Two chain runs alive at once (a hand-started run next to the chain): the newer pending run replaced the older pending one; nothing to do, the runs serialize in group `sched`.
 
 ## Limits
