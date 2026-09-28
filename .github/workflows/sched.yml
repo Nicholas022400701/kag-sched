@@ -9,7 +9,7 @@ on:
         type: boolean
         default: false
       loopMinutes:
-        description: 'Run a round every 15 min for this many minutes (0 = one round), then hand over to a self-dispatched next run'
+        description: 'Run a round every 20 min for this many minutes (0 = one round), then hand over to a self-dispatched next run'
         type: string
         default: '330'
       nextLoopMinutes:
@@ -22,6 +22,7 @@ permissions:
 env:
   SRC_REPO: Nicholas022400701/nndl-samam
   SRC_BRANCH: main
+  SLEEP_SEC: '1200'
   LOOP_MINUTES: ${{ github.event_name == 'workflow_dispatch' && inputs.loopMinutes || '0' }}
   NEXT_LOOP_MINUTES: ${{ github.event_name == 'workflow_dispatch' && (inputs.nextLoopMinutes || inputs.loopMinutes) || '0' }}
 jobs:

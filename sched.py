@@ -4,6 +4,7 @@ Reads  <SRC_DIR>/orch/plan.json (owners, limits, optional jobs), every <SRC_DIR>
 Kernels outside the plan are remembered in state.seen so finished ones are not queried again.
 A job with "adopt": true is never pushed; it is adopted as soon as its slug appears on the account (for kernels that people push by hand).
 Unpushed entries take owner/needH/timeoutSec from the plan every round; a derived resume job that was not pushed yet is withdrawn when its parent no longer declares resume.
+plan.budgetSince (optional ISO time such as 2026-09-28T14:00:00Z): GPU runs pushed or adopted before it do not count toward the owner budgets (a new account or a new quota week).
 Output files matching plan.fetchSkip (global) or the job's fetchSkip (globs, matched against the path and every trailing sub-path) stay on Kaggle.
 Writes <SRC_DIR>/orch/state.json, fetched outputs to <resultsDir>/raw/<slug>/, derived resume kernels to orch/kernels/.
 A round goes: kernel statuses, resume jobs, pushes, then fetches of finished outputs (a fetch can take minutes, so it no longer delays the pushes;
@@ -239,10 +240,12 @@ def fetchOut(k, user, slug, dest, lim, pats):
         got.append([name, n])
     writeJson(os.path.join(dest, '_manifest.json'), {'fetchedAt': now(), 'got': got, 'skipped': skip, 'totalBytes': total, 'listed': len(files), 'sessionLog': bool(sessLog), 'kernelSec': maxSec})
     return got, skip, total, maxSec
-def usedH(jobs, owner, t):
+def usedH(jobs, owner, t, since=''):
     tot = 0.0
     for st in jobs.values():
         if st.get('owner') != owner or not st.get('gpu') or st.get('blocked'):
+            continue
+        if since and (st.get('pushedAt') or '') < since:
             continue
         if st.get('status') in termStates:
             tot += st.get('wallH') or 0.0
@@ -436,7 +439,7 @@ def main():
             if proj < minRemainH or proj < need:
                 log(slug, f'not pushed: projected quota {round(proj, 2)} h < needed {max(minRemainH, need)} h')
                 continue
-            used = usedH(jobs, sp.get('owner'), t)
+            used = usedH(jobs, sp.get('owner'), t, str(plan.get('budgetSince') or ''))
             if used + need > float(od.get('budgetH', 0)):
                 log(slug, f'not pushed: owner budget used {used} + need {need} > {od.get("budgetH", 0)} h')
                 continue
