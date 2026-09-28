@@ -6,9 +6,11 @@ A job with "adopt": true is never pushed; it is adopted as soon as its slug appe
 Unpushed entries take owner/needH/timeoutSec from the plan every round; a derived resume job that was not pushed yet is withdrawn when its parent no longer declares resume.
 Output files matching plan.fetchSkip (global) or the job's fetchSkip (globs, matched against the path and every trailing sub-path) stay on Kaggle.
 Writes <SRC_DIR>/orch/state.json, fetched outputs to <resultsDir>/raw/<slug>/, derived resume kernels to orch/kernels/.
+A round goes: kernel statuses, resume jobs, pushes, then fetches of finished outputs (a fetch can take minutes, so it no longer delays the pushes;
+a budget check in the same round uses the wall-clock estimate of a run until its kernel log is fetched).
 Kernels on the account that are not in the plan count as GPU sessions (the list endpoint does not report the accelerator).
 Log lines carry only kernel slugs, statuses, counts and hours. Everything printed passes a masker that hides the owner name and the token.
-Exit codes: 0 normal (API trouble is logged and treated as unknown), 2 missing configuration."""
+Exit codes: 0 normal (API trouble is logged and treated as unknown), 2 missing or unreadable configuration (a state file that is not valid JSON is reported and left as it is)."""
 import argparse
 import datetime as dt
 import fnmatch
@@ -100,7 +102,11 @@ def specsOf(src, plan, jobs):
     lists = [('orch/plan.json', plan.get('jobs', []))]
     for sub in ('plan', 'jobs'):
         for p in sorted(glob.glob(os.path.join(src, 'orch', sub, '*.json'))):
-            d = readJson(p, [])
+            try:
+                d = readJson(p, [])
+            except ValueError as e:
+                log(os.path.relpath(p, src), 'is not valid JSON, skipped this round:', short(e))
+                continue
             lists.append((os.path.relpath(p, src), d.get('jobs', []) if isinstance(d, dict) else d))
     for name, arr in lists:
         for j in arr:
@@ -280,11 +286,15 @@ def main():
         sys.exit(2)
     src = os.path.abspath(a.src)
     planPath, statePath = os.path.join(src, 'orch', 'plan.json'), os.path.join(src, 'orch', 'state.json')
-    plan = readJson(planPath)
+    try:
+        plan = readJson(planPath)
+        state = readJson(statePath, {}) or {}
+    except ValueError as e:
+        log('orch/plan.json or orch/state.json is not valid JSON, fix it by hand:', short(e))
+        sys.exit(2)
     if not plan:
         log('orch/plan.json missing')
         sys.exit(2)
-    state = readJson(statePath, {}) or {}
     jobs = state.setdefault('jobs', {})
     runs = state.setdefault('runs', [])
     seen = state.setdefault('seen', {})
@@ -365,25 +375,6 @@ def main():
     gpuBusy = sum(1 for s, g in live.values() if g and (s in busyStates or s not in termStates))
     cpuBusy = sum(1 for s, g in live.values() if not g and (s in busyStates or s not in termStates))
     log(f'busy gpu {gpuBusy} cpu {cpuBusy} unknown {unknown}')
-    for slug, st in list(jobs.items()):
-        if st.get('status') in termStates and not st.get('fetchedAt') and int(st.get('fetchTries', 0)) < 3 and not a.dry_run:
-            od = owners.get(st.get('owner'), {})
-            dest = os.path.join(src, od.get('resultsDir', os.path.join('results', str(st.get('owner')))), 'raw', slug)
-            st['fetchTries'] = int(st.get('fetchTries', 0)) + 1
-            try:
-                pats = list(plan.get('fetchSkip', defaultSkip)) + list(specs.get(slug, {}).get('fetchSkip', []))
-                got, skip, total, maxSec = fetchOut(k, user, slug, dest, lim, pats)
-                st['fetchedAt'], st['fetched'], st['skipped'], st['fetchedBytes'] = now(), [g[0] for g in got], [s[0] for s in skip], total
-                if maxSec is not None:
-                    w = maxSec / 3600
-                    if st.get('status') == 'CANCEL_ACKNOWLEDGED' and st.get('timeoutSec'):
-                        w = max(w, float(st['timeoutSec']) / 3600)
-                    st['wallH'], st['wallSource'] = round(w, 3), 'kernel log'
-                acts.append(f'fetched {slug} {len(got)} files')
-                log(slug, 'fetched', len(got), 'files,', len(skip), 'skipped,', total, 'bytes')
-            except Exception as e:
-                st['fetchError'] = short(e)
-                log(slug, 'fetch failed:', short(e))
     for slug, st in list(jobs.items()):
         sp = specs.get(slug)
         if sp and sp.get('resume') and st.get('status') in ('ERROR', 'CANCEL_ACKNOWLEDGED') and not st.get('resumedBy') and not sp.get('resumeOf') and not a.dry_run:
@@ -485,6 +476,25 @@ def main():
             if gpu and 'Maximum batch GPU session count' in str(e):
                 log('gpu slots full on the account although the list shows', gpuBusy, 'busy (a session the list does not show); no more gpu pushes this round')
                 gpuBusy, hidden = maxBusy, True
+    for slug, st in list(jobs.items()):
+        if st.get('status') in termStates and not st.get('fetchedAt') and int(st.get('fetchTries', 0)) < 3 and not a.dry_run:
+            od = owners.get(st.get('owner'), {})
+            dest = os.path.join(src, od.get('resultsDir', os.path.join('results', str(st.get('owner')))), 'raw', slug)
+            st['fetchTries'] = int(st.get('fetchTries', 0)) + 1
+            try:
+                pats = list(plan.get('fetchSkip', defaultSkip)) + list(specs.get(slug, {}).get('fetchSkip', []))
+                got, skip, total, maxSec = fetchOut(k, user, slug, dest, lim, pats)
+                st['fetchedAt'], st['fetched'], st['skipped'], st['fetchedBytes'] = now(), [g[0] for g in got], [s[0] for s in skip], total
+                if maxSec is not None:
+                    w = maxSec / 3600
+                    if st.get('status') == 'CANCEL_ACKNOWLEDGED' and st.get('timeoutSec'):
+                        w = max(w, float(st['timeoutSec']) / 3600)
+                    st['wallH'], st['wallSource'] = round(w, 3), 'kernel log'
+                acts.append(f'fetched {slug} {len(got)} files')
+                log(slug, 'fetched', len(got), 'files,', len(skip), 'skipped,', total, 'bytes')
+            except Exception as e:
+                st['fetchError'] = short(e)
+                log(slug, 'fetch failed:', short(e))
     runs.append({'at': t, 'quotaRemainH': quota['remainH'] if quota else None, 'gpuBusy': gpuBusy, 'cpuBusy': cpuBusy, 'hiddenGpu': hidden, 'unknown': unknown, 'actions': acts, 'dryRun': a.dry_run})
     del runs[:-100]
     state['updatedAt'] = t

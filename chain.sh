@@ -2,9 +2,11 @@
 # Runs scheduling rounds every 15 min inside one job (LOOP_MINUTES), writes results back after each round,
 # and keeps exactly one successor run queued. `chain.sh dispatch` only does the hand-over.
 # `chain.sh watchdog` (cron job, no secrets) starts a new chain when no workflow_dispatch run is queued, pending or in progress.
-# Write-back: the round's commit is rebased onto origin with `-X theirs` (the scheduler's fetched copy wins a same-file conflict,
-# e.g. when an owner committed the same kernel output by hand); if the rebase still fails, only orch/state.json is written back
-# so a round's bookkeeping is never lost.
+# Write-back: the round's commit is rebased onto origin with `-X theirs` (where lines conflict the scheduler's copy wins,
+# e.g. when an owner committed the same kernel output by hand; everything else committed meanwhile survives). If the merged
+# state file is not valid JSON the round's version is taken whole. If the rebase still fails (e.g. a file the round changed
+# was deleted meanwhile), only the state file and the kernel dirs the round changed are written back (state-only commit) and
+# the outputs fetched in that round are marked unfetched, so the next round fetches them again and nothing is lost for good.
 # Env: SRC_DIR, SRC_BRANCH, SRC_REPO_PAT, DRY_RUN, LOOP_MINUTES, NEXT_LOOP_MINUTES, GH_TOKEN, GITHUB_REPOSITORY, GITHUB_RUN_ID, GITHUB_WORKSPACE.
 set -u
 here="${GITHUB_WORKSPACE:-$(cd "$(dirname "$0")" && pwd)}"
@@ -42,14 +44,53 @@ watchdog() {
     *) echo "chain alive ($others run(s) queued or in progress)" ;;
   esac
 }
+validJson() { python3 -c 'import json, sys; json.load(open(sys.argv[1]))' "$1" 2>/dev/null; }
 stateOnly() {
-  # keep this round's state file, drop everything else, re-commit on top of origin
-  cp "$statePath" "$here/state.keep.json" || return 1
+  # $1 = origin at round start, $2 = this round's commit. Rebuild the round on top of origin with the state file and the
+  # kernel dirs the round changed only; the fetched outputs are dropped and marked unfetched (the try is not counted).
+  orch=$(dirname "$statePath")
+  keep=$(git diff --name-only "$1" "$2" -- "$orch/kernels" | sed -E "s#^($orch/kernels/[^/]+)/.*#\1#" | sort -u)
   git reset -q --hard "origin/$SRC_BRANCH"; git clean -qfd
-  cp "$here/state.keep.json" "$statePath"
-  git add "$statePath"
+  for p in $keep; do git rm -rq --ignore-unmatch -- "$p"; git checkout -q "$2" -- "$p" 2>/dev/null || true; done
+  git show "$2:$statePath" > "$here/state.round.json" || return 1
+  git show "$1:$statePath" > "$here/state.base.json" 2>/dev/null || : > "$here/state.base.json"
+  cp "$here/state.round.json" "$here/state.merged.json"
+  if [ -f "$statePath" ]; then
+    git merge-file -q --ours "$here/state.merged.json" "$here/state.base.json" "$statePath" >/dev/null 2>&1 || true
+  fi
+  if validJson "$here/state.merged.json"; then
+    cp "$here/state.merged.json" "$statePath"
+  else
+    echo "the merged $statePath is not valid JSON, taking this round's version whole"; cp "$here/state.round.json" "$statePath"
+  fi
+  rm -f "$here/state.round.json" "$here/state.base.json" "$here/state.merged.json"
+  python3 - "$statePath" "$1" <<'EOF'
+import json, subprocess, sys
+p, base = sys.argv[1], sys.argv[2]
+d = json.load(open(p))
+try:
+    old = json.loads(subprocess.run(['git', 'show', f'{base}:{p}'], capture_output=True, text=True, check=True).stdout).get('jobs', {})
+except Exception as e:
+    old = None
+    print('the state at round start is unreadable, fetch marks left as they are:', e)
+drop = []
+for slug, st in (d.get('jobs', {}) if old is not None else {}).items():
+    if st.get('fetchedAt') and st['fetchedAt'] != old.get(slug, {}).get('fetchedAt'):
+        for k in ('fetchedAt', 'fetched', 'skipped', 'fetchedBytes'):
+            st.pop(k, None)
+        st['fetchTries'] = max(0, int(st.get('fetchTries', 1)) - 1)
+        drop.append(slug)
+if drop:
+    if d.get('runs'):
+        d['runs'][-1]['refetch'] = drop
+    with open(p, 'w') as f:
+        json.dump(d, f, indent=1, sort_keys=True)
+        f.write('\n')
+    print(len(drop), 'output(s) fetched this round are dropped with the conflict and will be fetched again:', ' '.join(drop))
+EOF
+  git add -A -- "$orch"
   if git diff --cached --quiet; then echo "state unchanged, nothing left to write back"; return 2; fi
-  python3 "$here/scan.py" --staged || { echo "scan hit on the state file"; git reset -q --hard HEAD; return 1; }
+  python3 "$here/scan.py" --staged || { echo "scan hit on the state file"; git reset -q --hard HEAD; git clean -qfd; return 1; }
   git commit -q -m "sched: round $(date -u +%Y-%m-%dT%H:%MZ) (state only)"
 }
 case "${1:-}" in
@@ -80,14 +121,22 @@ while :; do
       echo "scan hit: this round is not written back"
       git reset -q --hard HEAD; git clean -qfd
     else
+      base=$(git rev-parse HEAD)
       git commit -q -m "sched: round $(date -u +%Y-%m-%dT%H:%MZ)"
+      round=$(git rev-parse HEAD)
       ok=0
       for i in 1 2 3; do
         gitAuth fetch -q origin "$SRC_BRANCH" || true
-        if ! git rebase -q -X theirs "origin/$SRC_BRANCH"; then
+        git diff --quiet "$base" "origin/$SRC_BRANCH" -- "$statePath" 2>/dev/null || echo "$statePath changed on origin during this round; where lines conflict the scheduler's version wins"
+        if git -c advice.mergeConflict=false rebase -q -X theirs "origin/$SRC_BRANCH"; then
+          if ! validJson "$statePath"; then
+            echo "the merged $statePath is not valid JSON, taking this round's version whole"
+            git checkout -q "$round" -- "$statePath" && git commit -q --amend --no-edit
+          fi
+        else
           git rebase --abort || true
           echo "rebase failed even with -X theirs, writing back the state file only"
-          stateOnly; rc=$?
+          stateOnly "$base" "$round"; rc=$?
           if [ "$rc" = 2 ]; then ok=1; break; fi
           [ "$rc" = 0 ] || { echo "state-only write-back not possible"; break; }
         fi
