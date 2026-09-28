@@ -76,7 +76,7 @@ except Exception as e:
 drop = []
 for slug, st in (d.get('jobs', {}) if old is not None else {}).items():
     if st.get('fetchedAt') and st['fetchedAt'] != old.get(slug, {}).get('fetchedAt'):
-        for k in ('fetchedAt', 'fetched', 'skipped', 'fetchedBytes'):
+        for k in ('fetchedAt', 'fetched', 'skipped', 'fetchedN', 'skippedN', 'fetchedBytes'):
             st.pop(k, None)
         st['fetchTries'] = max(0, int(st.get('fetchTries', 1)) - 1)
         drop.append(slug)

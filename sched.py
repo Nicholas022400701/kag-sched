@@ -7,6 +7,7 @@ Unpushed entries take owner/needH/timeoutSec from the plan every round; a derive
 plan.budgetSince (optional ISO time such as 2026-09-28T14:00:00Z): GPU runs pushed or adopted before it do not count toward the owner budgets (a new account or a new quota week).
 Output files matching plan.fetchSkip (global) or the job's fetchSkip (globs, matched against the path and every trailing sub-path) stay on Kaggle.
 Writes <SRC_DIR>/orch/state.json, fetched outputs to <resultsDir>/raw/<slug>/, derived resume kernels to orch/kernels/.
+The state keeps only counts of fetched/skipped files (fetchedN/skippedN); the file names are in <resultsDir>/raw/<slug>/_manifest.json. Legacy per-file lists are compacted on load.
 A round goes: kernel statuses, resume jobs, pushes, then fetches of finished outputs (a fetch can take minutes, so it no longer delays the pushes;
 a budget check in the same round uses the wall-clock estimate of a run until its kernel log is fetched).
 Kernels on the account that are not in the plan count as GPU sessions (the list endpoint does not report the accelerator).
@@ -299,6 +300,10 @@ def main():
         log('orch/plan.json missing')
         sys.exit(2)
     jobs = state.setdefault('jobs', {})
+    for st in jobs.values():
+        for k, n in (('fetched', 'fetchedN'), ('skipped', 'skippedN')):
+            if isinstance(st.get(k), list):
+                st[n] = len(st.pop(k))
     runs = state.setdefault('runs', [])
     seen = state.setdefault('seen', {})
     owners = plan.get('owners', {})
@@ -487,7 +492,7 @@ def main():
             try:
                 pats = list(plan.get('fetchSkip', defaultSkip)) + list(specs.get(slug, {}).get('fetchSkip', []))
                 got, skip, total, maxSec = fetchOut(k, user, slug, dest, lim, pats)
-                st['fetchedAt'], st['fetched'], st['skipped'], st['fetchedBytes'] = now(), [g[0] for g in got], [s[0] for s in skip], total
+                st['fetchedAt'], st['fetchedN'], st['skippedN'], st['fetchedBytes'] = now(), len(got), len(skip), total
                 if maxSec is not None:
                     w = maxSec / 3600
                     if st.get('status') == 'CANCEL_ACKNOWLEDGED' and st.get('timeoutSec'):
