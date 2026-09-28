@@ -399,6 +399,7 @@ def main():
                 log(slug, 'resume creation failed:', short(e))
     order = {o: (int(v.get('priority', 9)), i) for i, (o, v) in enumerate(owners.items())}
     cands = [sp for sp in specs.values() if not jobs.get(sp['id'], {}).get('pushedAt')]
+    hidden = False
     cands.sort(key=lambda sp: (order.get(sp.get('owner'), (99, 99)), int(sp.get('priority', 9))))
     pushed = 0
     for sp in cands:
@@ -481,7 +482,10 @@ def main():
         except Exception as e:
             st['lastPushError'], st['lastPushErrorAt'], st['pushTries'] = short(e), t, int(st.get('pushTries', 0)) + 1
             log(slug, 'push failed:', short(e))
-    runs.append({'at': t, 'quotaRemainH': quota['remainH'] if quota else None, 'gpuBusy': gpuBusy, 'cpuBusy': cpuBusy, 'unknown': unknown, 'actions': acts, 'dryRun': a.dry_run})
+            if gpu and 'Maximum batch GPU session count' in str(e):
+                log('gpu slots full on the account although the list shows', gpuBusy, 'busy (a session the list does not show); no more gpu pushes this round')
+                gpuBusy, hidden = maxBusy, True
+    runs.append({'at': t, 'quotaRemainH': quota['remainH'] if quota else None, 'gpuBusy': gpuBusy, 'cpuBusy': cpuBusy, 'hiddenGpu': hidden, 'unknown': unknown, 'actions': acts, 'dryRun': a.dry_run})
     del runs[:-100]
     state['updatedAt'] = t
     if a.dry_run:
