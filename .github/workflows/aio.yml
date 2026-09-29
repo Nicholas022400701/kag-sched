@@ -1,0 +1,57 @@
+name: aio
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to create on the source repository (empty = allinone-<short sha>)'
+        type: string
+        default: ''
+permissions:
+  contents: read
+env:
+  SRC_REPO: Nicholas022400701/nndl-samam
+  SRC_BRANCH: main
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    concurrency:
+      group: aio
+      cancel-in-progress: false
+    steps:
+      - name: Require and mask secrets
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          KAGGLE_USER: ${{ secrets.KAGGLE_USER }}
+          SRC_REPO_PAT: ${{ secrets.SRC_REPO_PAT }}
+        run: |
+          for v in KAGGLE_API_TOKEN KAGGLE_USER SRC_REPO_PAT; do
+            if [ -z "${!v}" ]; then echo "missing secret: $v"; exit 1; fi
+            echo "::add-mask::${!v}"
+          done
+          echo "::add-mask::$(printf '%s' "$KAGGLE_USER" | tr '[:lower:]' '[:upper:]')"
+          echo "::add-mask::$(printf 'x-access-token:%s' "$SRC_REPO_PAT" | base64 -w0)"
+      - name: Checkout source repository (full history)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ env.SRC_REPO }}
+          ref: ${{ env.SRC_BRANCH }}
+          token: ${{ secrets.SRC_REPO_PAT }}
+          path: src
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install client
+        run: python3 -m pip install -q --user --disable-pip-version-check kaggle==2.2.4
+      - name: Pack and publish to the source repository's release
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          KAGGLE_USER: ${{ secrets.KAGGLE_USER }}
+          GH_TOKEN: ${{ secrets.SRC_REPO_PAT }}
+          SRC_DIR: ${{ github.workspace }}/src
+          OUT_DIR: ${{ github.workspace }}/out
+          DL_DIR: ${{ github.workspace }}/dl
+          TAG: ${{ inputs.tag }}
+        run: bash src/deliverables/aio/pack.sh
+      - name: Remove working data
+        if: always()
+        run: rm -rf "$GITHUB_WORKSPACE/src" "$GITHUB_WORKSPACE/out" "$GITHUB_WORKSPACE/dl"
