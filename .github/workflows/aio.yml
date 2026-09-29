@@ -2,8 +2,21 @@ name: aio
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: 'release = split parts onto a release of the source repository · single = one merged zip, encrypted to pubkey and parked on a transfer release here · cleanup = delete the transfer release named by xferTag'
+        type: choice
+        options: [release, single, cleanup]
+        default: release
       tag:
-        description: 'Release tag to create on the source repository (empty = allinone-<short sha>)'
+        description: 'release mode: tag to create on the source repository (empty = allinone-<short sha>)'
+        type: string
+        default: ''
+      pubkey:
+        description: 'single mode: one-line base64 of an RSA public key PEM; the archive key is wrapped to it'
+        type: string
+        default: ''
+      xferTag:
+        description: 'cleanup mode: transfer release tag to delete (single mode names it xfer-<run id>)'
         type: string
         default: ''
 permissions:
@@ -13,6 +26,7 @@ env:
   SRC_BRANCH: main
 jobs:
   pack:
+    if: inputs.mode == 'release'
     runs-on: ubuntu-latest
     timeout-minutes: 150
     concurrency:
@@ -55,3 +69,66 @@ jobs:
       - name: Remove working data
         if: always()
         run: rm -rf "$GITHUB_WORKSPACE/src" "$GITHUB_WORKSPACE/out" "$GITHUB_WORKSPACE/dl"
+  single:
+    if: inputs.mode == 'single'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    concurrency:
+      group: aio
+      cancel-in-progress: false
+    steps:
+      - name: Require and mask secrets
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          KAGGLE_USER: ${{ secrets.KAGGLE_USER }}
+          SRC_REPO_PAT: ${{ secrets.SRC_REPO_PAT }}
+        run: |
+          for v in KAGGLE_API_TOKEN KAGGLE_USER SRC_REPO_PAT; do
+            if [ -z "${!v}" ]; then echo "missing secret: $v"; exit 1; fi
+            echo "::add-mask::${!v}"
+          done
+          echo "::add-mask::$(printf '%s' "$KAGGLE_USER" | tr '[:lower:]' '[:upper:]')"
+          echo "::add-mask::$(printf 'x-access-token:%s' "$SRC_REPO_PAT" | base64 -w0)"
+      - name: Checkout source repository (full history)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ env.SRC_REPO }}
+          ref: ${{ env.SRC_BRANCH }}
+          token: ${{ secrets.SRC_REPO_PAT }}
+          path: src
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install client
+        run: python3 -m pip install -q --user --disable-pip-version-check kaggle==2.2.4
+      - name: Pack one merged zip, encrypt it and park it on a transfer release here
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          KAGGLE_USER: ${{ secrets.KAGGLE_USER }}
+          SRC_DIR: ${{ github.workspace }}/src
+          OUT_DIR: ${{ github.workspace }}/out
+          DL_DIR: ${{ github.workspace }}/dl
+          PUBKEY_B64: ${{ inputs.pubkey }}
+          XFER_TOKEN: ${{ github.token }}
+          XFER_REPO: ${{ github.repository }}
+          XFER_TAG: xfer-${{ github.run_id }}
+        run: bash src/deliverables/aio/pack_single.sh
+      - name: Remove working data
+        if: always()
+        run: rm -rf "$GITHUB_WORKSPACE/src" "$GITHUB_WORKSPACE/out" "$GITHUB_WORKSPACE/dl"
+  cleanup:
+    if: inputs.mode == 'cleanup'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Delete the transfer release and its tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          XFER_TAG: ${{ inputs.xferTag }}
+        run: |
+          case "$XFER_TAG" in xfer-*) ;; *) echo "refusing: xferTag must start with xfer-"; exit 1;; esac
+          gh release delete "$XFER_TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag -y
+          gh release view "$XFER_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && { echo "still present"; exit 1; } || echo "deleted $XFER_TAG"
