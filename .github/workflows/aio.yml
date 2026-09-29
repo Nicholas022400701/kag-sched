@@ -3,12 +3,16 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'release = split parts onto a release of the source repository · single = one merged zip, encrypted to pubkey and parked on a transfer release here · cleanup = delete the transfer release named by xferTag'
+        description: 'release = split parts onto a release of the source repository · single = one merged zip, encrypted to pubkey and parked on a transfer release here · single-release = one merged zip as <2 GiB byte chunks on a release of the source repository · cleanup = delete the transfer release named by xferTag'
         type: choice
-        options: [release, single, cleanup]
+        options: [release, single, single-release, cleanup]
         default: release
+      ref:
+        description: 'Commit SHA or branch of the source repository to pack (empty = main)'
+        type: string
+        default: ''
       tag:
-        description: 'release mode: tag to create on the source repository (empty = allinone-<short sha>)'
+        description: 'release / single-release modes: tag to create on the source repository (empty = allinone-<short sha> / allinone-single-<short sha>)'
         type: string
         default: ''
       pubkey:
@@ -49,7 +53,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: ${{ env.SRC_REPO }}
-          ref: ${{ env.SRC_BRANCH }}
+          ref: ${{ inputs.ref || env.SRC_BRANCH }}
           token: ${{ secrets.SRC_REPO_PAT }}
           path: src
           persist-credentials: false
@@ -95,7 +99,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: ${{ env.SRC_REPO }}
-          ref: ${{ env.SRC_BRANCH }}
+          ref: ${{ inputs.ref || env.SRC_BRANCH }}
           token: ${{ secrets.SRC_REPO_PAT }}
           path: src
           persist-credentials: false
@@ -109,10 +113,56 @@ jobs:
           SRC_DIR: ${{ github.workspace }}/src
           OUT_DIR: ${{ github.workspace }}/out
           DL_DIR: ${{ github.workspace }}/dl
+          DELIVERY: xfer
           PUBKEY_B64: ${{ inputs.pubkey }}
           XFER_TOKEN: ${{ github.token }}
           XFER_REPO: ${{ github.repository }}
           XFER_TAG: xfer-${{ github.run_id }}
+        run: bash src/deliverables/aio/pack_single.sh
+      - name: Remove working data
+        if: always()
+        run: rm -rf "$GITHUB_WORKSPACE/src" "$GITHUB_WORKSPACE/out" "$GITHUB_WORKSPACE/dl"
+  single_release:
+    if: inputs.mode == 'single-release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    concurrency:
+      group: aio
+      cancel-in-progress: false
+    steps:
+      - name: Require and mask secrets
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          KAGGLE_USER: ${{ secrets.KAGGLE_USER }}
+          SRC_REPO_PAT: ${{ secrets.SRC_REPO_PAT }}
+        run: |
+          for v in KAGGLE_API_TOKEN KAGGLE_USER SRC_REPO_PAT; do
+            if [ -z "${!v}" ]; then echo "missing secret: $v"; exit 1; fi
+            echo "::add-mask::${!v}"
+          done
+          echo "::add-mask::$(printf '%s' "$KAGGLE_USER" | tr '[:lower:]' '[:upper:]')"
+          echo "::add-mask::$(printf 'x-access-token:%s' "$SRC_REPO_PAT" | base64 -w0)"
+      - name: Checkout source repository (full history)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ env.SRC_REPO }}
+          ref: ${{ inputs.ref || env.SRC_BRANCH }}
+          token: ${{ secrets.SRC_REPO_PAT }}
+          path: src
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install client
+        run: python3 -m pip install -q --user --disable-pip-version-check kaggle==2.2.4
+      - name: Pack one merged zip and attach it, in <2 GiB chunks, to a release of the source repository
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          KAGGLE_USER: ${{ secrets.KAGGLE_USER }}
+          SRC_DIR: ${{ github.workspace }}/src
+          OUT_DIR: ${{ github.workspace }}/out
+          DL_DIR: ${{ github.workspace }}/dl
+          DELIVERY: release
+          GH_TOKEN: ${{ secrets.SRC_REPO_PAT }}
+          TAG: ${{ inputs.tag }}
         run: bash src/deliverables/aio/pack_single.sh
       - name: Remove working data
         if: always()
