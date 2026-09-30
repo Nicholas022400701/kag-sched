@@ -1,0 +1,103 @@
+name: private-cpu
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Exact source revision
+        type: string
+        required: true
+      phase:
+        description: Work phase
+        type: choice
+        options: [prepare, probe, infer]
+        default: probe
+      slots:
+        description: Numeric work items as JSON
+        type: string
+        default: '[0]'
+      pubkey:
+        description: Base64 recipient public key
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  compute:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        slot: ${{ fromJSON(inputs.slots) }}
+    env:
+      CPU_ROOT: ${{ runner.temp }}/cpu-private
+      CPU_SEALED: ${{ runner.temp }}/cpu-sealed/data.bin
+      CPU_REF: ${{ inputs.ref }}
+      CPU_PHASE: ${{ inputs.phase }}
+      CPU_SLOT: ${{ matrix.slot }}
+      CPU_PUBKEY: ${{ inputs.pubkey }}
+    steps:
+      - name: Checkout public runner only
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Prepare sealed-output capability
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 -m venv "$RUNNER_TEMP/cpu-env"
+          "$RUNNER_TEMP/cpu-env/bin/python" -m pip install --quiet --disable-pip-version-check cryptography==46.0.3
+      - name: Fetch private inputs without printing them
+        env:
+          SRC_REPO_PAT: ${{ secrets.SRC_REPO_PAT }}
+        run: |
+          set -euo pipefail
+          umask 077
+          "$RUNNER_TEMP/cpu-env/bin/python" tools/cpu_box.py fetch
+      - name: Install CPU-only dependencies
+        run: '"$RUNNER_TEMP/cpu-env/bin/python" tools/cpu_box.py install'
+      - name: Execute offline without credentials or network
+        run: '"$RUNNER_TEMP/cpu-env/bin/python" tools/cpu_box.py offline'
+      - name: Persist to private source repository
+        env:
+          SRC_REPO_PAT: ${{ secrets.SRC_REPO_PAT }}
+        run: '"$RUNNER_TEMP/cpu-env/bin/python" tools/cpu_box.py publish'
+      - name: Seal results and private logs
+        if: always()
+        env:
+          SRC_REPO_PAT: ${{ secrets.SRC_REPO_PAT }}
+        run: '"$RUNNER_TEMP/cpu-env/bin/python" tools/cpu_box.py seal'
+      - name: Upload ciphertext only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sealed-part-${{ matrix.slot }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cpu-sealed/data.bin
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Remove private working files
+        if: always()
+        run: sudo rm -rf "$CPU_ROOT" "$RUNNER_TEMP/cpu-env"
+  collect:
+    if: always()
+    needs: compute
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Collect sealed parts without decrypting
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: sealed-part-*
+          path: parts
+      - name: Bundle ciphertext
+        run: tar -cf sealed-bundle.tar -C parts .
+      - name: Store ciphertext bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sealed-bundle-${{ github.run_attempt }}
+          path: sealed-bundle.tar
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
